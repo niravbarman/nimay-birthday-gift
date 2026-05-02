@@ -1,0 +1,13 @@
+{
+  "files": {
+    "main.css": "/nimay-birthday-gift/static/css/main.da2ae667.css",
+    "main.js": "/nimay-birthday-gift/static/js/main.d5d83fa7.js",
+    "index.html": "/nimay-birthday-gift/index.html",
+    "main.da2ae667.css.map": "/nimay-birthday-gift/static/css/main.da2ae667.css.map",
+    "main.d5d83fa7.js.map": "/nimay-birthday-gift/static/js/main.d5d83fa7.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.da2ae667.css",
+    "static/js/main.d5d83fa7.js"
+  ]
+}
