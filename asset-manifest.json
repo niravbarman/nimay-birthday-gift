@@ -1,13 +1,13 @@
 {
   "files": {
     "main.css": "/nimay-birthday-gift/static/css/main.da2ae667.css",
-    "main.js": "/nimay-birthday-gift/static/js/main.d5d83fa7.js",
+    "main.js": "/nimay-birthday-gift/static/js/main.c68ad948.js",
     "index.html": "/nimay-birthday-gift/index.html",
     "main.da2ae667.css.map": "/nimay-birthday-gift/static/css/main.da2ae667.css.map",
-    "main.d5d83fa7.js.map": "/nimay-birthday-gift/static/js/main.d5d83fa7.js.map"
+    "main.c68ad948.js.map": "/nimay-birthday-gift/static/js/main.c68ad948.js.map"
   },
   "entrypoints": [
     "static/css/main.da2ae667.css",
-    "static/js/main.d5d83fa7.js"
+    "static/js/main.c68ad948.js"
   ]
 }
