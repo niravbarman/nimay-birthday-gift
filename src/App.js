@@ -6,17 +6,32 @@ import './App.css';
 const PASSWORD = "Nirav is Lyla's absolute favorite";
 const INITIAL_SECONDS = 30 * 3600; // 30 hours
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Timer architecture (fixes multi-tab multiplication):
+//
+//  Firebase /timerState stores:
+//    { secondsAtStart, startedAt (unix ms), running }
+//
+//  NO tab ever writes the ticking value back to Firebase.
+//  Every tab independently computes:
+//    displayed = secondsAtStart - (Date.now() - startedAt) / 1000
+//
+//  Only Start and Pause write to Firebase. 100 tabs = 1 timer.
+//
+//  Firebase /pendingActivity stores the in-progress activity data as a
+//  cross-tab lock. While it exists, other tabs cannot start the timer.
+// ─────────────────────────────────────────────────────────────────────────────
+
 const formatTime = (totalSeconds) => {
   const neg = totalSeconds < 0;
-  const abs = Math.abs(totalSeconds);
+  const abs = Math.abs(Math.round(totalSeconds));
   const h = Math.floor(abs / 3600).toString().padStart(2, '0');
   const m = Math.floor((abs % 3600) / 60).toString().padStart(2, '0');
   const s = (abs % 60).toString().padStart(2, '0');
   return { neg, str: `${h}:${m}:${s}` };
 };
 
-const now = () => {
+const nowLabel = () => {
   const d = new Date();
   return {
     date: d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }),
@@ -60,9 +75,36 @@ function PasswordModal({ onConfirm, onCancel }) {
   );
 }
 
+// ── Activity Blocked Modal ────────────────────────────────────────────────────
+function ActivityBlockedModal({ onClose, onOverride }) {
+  const [showPassword, setShowPassword] = useState(false);
+
+  if (showPassword) {
+    return (
+      <PasswordModal
+        onConfirm={onOverride}
+        onCancel={() => setShowPassword(false)}
+      />
+    );
+  }
+
+  return (
+    <div className="overlay">
+      <div className="modal small-modal">
+        <h2>Can't start timer.</h2>
+        <p className="sub-text">Activity being created.</p>
+        <div className="btn-row">
+          <button className="btn btn-ghost" onClick={onClose}>Close</button>
+          <button className="btn btn-warn" onClick={() => setShowPassword(true)}>Override</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Description Modal ─────────────────────────────────────────────────────────
 function DescriptionModal({ activity, onClose, onEdit, onDelete }) {
-  const [mode, setMode] = useState(null); // 'edit' | 'delete'
+  const [mode, setMode] = useState(null);
 
   if (mode) {
     return (
@@ -105,14 +147,11 @@ function CancelConfirmModal({ onConfirm, onKeepEditing }) {
 }
 
 // ── Activity Created Modal ────────────────────────────────────────────────────
-function ActivityModal({ timeUsedSecs, startedAt, onLog, onCancel, initialData }) {
-  const [name, setName] = useState(initialData?.name || '');
-  const [desc, setDesc] = useState(initialData?.description || '');
+function ActivityModal({ timeUsedSecs, startedAt, onLog, onCancel }) {
+  const [name, setName] = useState('');
+  const [desc, setDesc] = useState('');
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
-  const { date, time } = initialData
-    ? { date: initialData.dateCreated, time: initialData.timeCreated }
-    : (startedAt || now());
-
+  const { date, time } = startedAt || nowLabel();
   const timeUsed = formatTime(timeUsedSecs);
 
   if (showCancelConfirm) {
@@ -137,25 +176,13 @@ function ActivityModal({ timeUsedSecs, startedAt, onLog, onCancel, initialData }
             <span className="meta-chip date-chip">🕐 {time}</span>
           </div>
         </div>
-
         <label className="field-label">Name Activity:</label>
-        <input
-          type="text"
-          className="text-input"
-          value={name}
-          onChange={e => setName(e.target.value)}
-          placeholder="Give this activity a name…"
-        />
-
+        <input type="text" className="text-input" value={name}
+          onChange={e => setName(e.target.value)} placeholder="Give this activity a name…" />
         <label className="field-label">Activity Description:</label>
-        <textarea
-          className="text-input textarea"
-          value={desc}
+        <textarea className="text-input textarea" value={desc}
           onChange={e => setDesc(e.target.value)}
-          placeholder="Describe what you did together…"
-          rows={5}
-        />
-
+          placeholder="Describe what you did together…" rows={5} />
         <div className="btn-row">
           <button className="btn btn-warn" onClick={() => setShowCancelConfirm(true)}>
             Cancel Activity
@@ -169,43 +196,94 @@ function ActivityModal({ timeUsedSecs, startedAt, onLog, onCancel, initialData }
   );
 }
 
+// ── Edit Activity Modal ───────────────────────────────────────────────────────
+function EditActivityModal({ activity, onSave, onClose }) {
+  const [name, setName] = useState(activity.name);
+  const [desc, setDesc] = useState(activity.description || '');
+  const [logged, setLogged] = useState(activity.logged);
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const { neg, str } = formatTime(activity.timeUsedSecs);
+
+  if (showCancelConfirm) {
+    return (
+      <CancelConfirmModal
+        onConfirm={() => onSave({ name, description: desc, logged: false })}
+        onKeepEditing={() => setShowCancelConfirm(false)}
+      />
+    );
+  }
+
+  return (
+    <div className="overlay">
+      <div className="modal activity-modal">
+        <div className="modal-header-row">
+          <h2 className="modal-title">Edit Activity</h2>
+          <div className="modal-meta">
+            <span className="meta-chip time-chip">⏱ {neg ? '-' : ''}{str} used</span>
+            <span className="meta-chip date-chip">📅 {activity.dateCreated}</span>
+            <span className="meta-chip date-chip">🕐 {activity.timeCreated}</span>
+          </div>
+        </div>
+        <label className="field-label">Name Activity:</label>
+        <input type="text" className="text-input" value={name}
+          onChange={e => setName(e.target.value)} />
+        <label className="field-label">Activity Description:</label>
+        <textarea className="text-input textarea" value={desc}
+          onChange={e => setDesc(e.target.value)} rows={5} />
+        <label className="field-label">Status:</label>
+        <div className="toggle-row">
+          <button className={`btn btn-sm ${logged ? 'btn-success' : 'btn-ghost'}`}
+            onClick={() => setLogged(true)}>Logged</button>
+          <button className={`btn btn-sm ${!logged ? 'btn-danger' : 'btn-ghost'}`}
+            onClick={() => setLogged(false)}>Cancelled</button>
+        </div>
+        <div className="btn-row">
+          <button className="btn btn-ghost" onClick={onClose}>Discard Changes</button>
+          <button className="btn btn-primary"
+            onClick={() => onSave({ name, description: desc, logged })}>
+            Save Changes
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const [ready, setReady] = useState(false);
-  const [timerSeconds, setTimerSeconds] = useState(INITIAL_SECONDS);
-  const [running, setRunning] = useState(false);
-  const [activities, setActivities] = useState([]);
+  const [ready, setReady]                 = useState(false);
+  const [timerSeconds, setTimerSeconds]   = useState(INITIAL_SECONDS);
+  const [running, setRunning]             = useState(false);
+  const [activities, setActivities]       = useState([]);
   const [activityModal, setActivityModal] = useState(null);
-  const [descModal, setDescModal] = useState(null);
-  const [editModal, setEditModal] = useState(null);
-  const [flashRed, setFlashRed] = useState(false);
+  const [descModal, setDescModal]         = useState(null);
+  const [editModal, setEditModal]         = useState(null);
+  const [flashRed, setFlashRed]           = useState(false);
+  const [blockedModal, setBlockedModal]   = useState(false);
+  const [pendingActivity, setPendingActivity] = useState(null);
 
-  const timerRef = useRef(null);
-  const sessionStartRef = useRef(null); // seconds at which this run started
-  const pausedAtRef = useRef(null);     // timestamp info when paused
+  // Raw Firebase timer state — read by the local display tick
+  const timerStateRef  = useRef({ secondsAtStart: INITIAL_SECONDS, startedAt: null, running: false });
+  // Whether THIS tab triggered the pause (so it shows the modal)
+  const thisTabPausedRef = useRef(false);
 
-  // ── Firebase Auth ────────────────────────────────────────────────────────
+  // ── Auth ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     signInAnon().then(() => setReady(true)).catch(console.error);
   }, []);
 
-  // ── Firebase Listeners ───────────────────────────────────────────────────
+  // ── Firebase listeners ────────────────────────────────────────────────────
   useEffect(() => {
     if (!ready) return;
-    const timerDbRef = ref(db, 'timer');
-    const unsubTimer = onValue(timerDbRef, snap => {
+
+    const unsubState = onValue(ref(db, 'timerState'), snap => {
       const val = snap.val();
-      if (val !== null) setTimerSeconds(val);
+      if (!val) return;
+      timerStateRef.current = val;
+      setRunning(!!val.running);
     });
 
-    const runningDbRef = ref(db, 'running');
-    const unsubRunning = onValue(runningDbRef, snap => {
-      const val = snap.val();
-      if (val !== null) setRunning(!!val);
-    });
-
-    const activitiesDbRef = ref(db, 'activities');
-    const unsubActivities = onValue(activitiesDbRef, snap => {
+    const unsubActs = onValue(ref(db, 'activities'), snap => {
       const val = snap.val();
       if (val) {
         const list = Object.entries(val).map(([id, a]) => ({ id, ...a }));
@@ -216,94 +294,157 @@ export default function App() {
       }
     });
 
-    return () => { unsubTimer(); unsubRunning(); unsubActivities(); };
+    const unsubPending = onValue(ref(db, 'pendingActivity'), snap => {
+      const val = snap.val() || null;
+      setPendingActivity(val);
+    });
+
+    return () => { unsubState(); unsubActs(); unsubPending(); };
   }, [ready]);
 
-  // ── Flash red when negative ──────────────────────────────────────────────
+  // ── Show modal on this tab when it caused the pause ───────────────────────
   useEffect(() => {
-    if (timerSeconds < 0 && running) setFlashRed(true);
-    else if (timerSeconds >= 0) setFlashRed(false);
-  }, [timerSeconds, running]);
-
-  // ── Local countdown tick ─────────────────────────────────────────────────
-  useEffect(() => {
-    if (running) {
-      timerRef.current = setInterval(() => {
-        setTimerSeconds(prev => {
-          const next = prev - 1;
-          set(ref(db, 'timer'), next);
-          return next;
-        });
-      }, 1000);
-    } else {
-      clearInterval(timerRef.current);
+    if (pendingActivity && thisTabPausedRef.current) {
+      setActivityModal({
+        timeUsedSecs:     pendingActivity.timeUsedSecs,
+        startedAt:        { date: pendingActivity.pausedDate, time: pendingActivity.pausedTime },
+        timerBeforeStart: pendingActivity.timerBeforeStart,
+      });
+      thisTabPausedRef.current = false;
     }
-    return () => clearInterval(timerRef.current);
-  }, [running]);
+  }, [pendingActivity]);
 
-  // ── Last activity logged check ───────────────────────────────────────────
-  const lastActivityLogged = activities.length > 0 &&
-    activities[activities.length - 1]?.logged === true &&
-    timerSeconds <= 0;
+  // ── Local display tick — READS only, never writes ─────────────────────────
+  useEffect(() => {
+    const tick = () => {
+      const { secondsAtStart, startedAt, running: r } = timerStateRef.current;
+      if (r && startedAt) {
+        const elapsed   = (Date.now() - startedAt) / 1000;
+        const displayed = secondsAtStart - elapsed;
+        setTimerSeconds(displayed);
+        setFlashRed(displayed < 0);
+      } else {
+        setTimerSeconds(secondsAtStart ?? INITIAL_SECONDS);
+        setFlashRed(false);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 250);
+    return () => clearInterval(id);
+  }, [ready]);
 
-  // ── Start ────────────────────────────────────────────────────────────────
-  const handleStart = useCallback(() => {
-    if (lastActivityLogged) return;
-    sessionStartRef.current = timerSeconds;
-    set(ref(db, 'running'), true);
-  }, [timerSeconds, lastActivityLogged]);
+  // ── Start ─────────────────────────────────────────────────────────────────
+  const handleStart = useCallback(async () => {
+    const pendSnap = await get(ref(db, 'pendingActivity'));
+    if (pendSnap.val()) {
+      setBlockedModal(true);
+      return;
+    }
+    const stateSnap = await get(ref(db, 'timerState'));
+    const state     = stateSnap.val() || {};
+    const secondsNow = state.running
+      ? state.secondsAtStart - (Date.now() - state.startedAt) / 1000
+      : (state.secondsAtStart ?? INITIAL_SECONDS);
 
-  // ── Pause ────────────────────────────────────────────────────────────────
-  const handlePause = useCallback(() => {
-    set(ref(db, 'running'), false);
-    const timeUsed = (sessionStartRef.current ?? INITIAL_SECONDS) - timerSeconds;
-    pausedAtRef.current = now();
-    setActivityModal({
-      timeUsedSecs: timeUsed,
-      startedAt: pausedAtRef.current,
-      timerBeforeStart: sessionStartRef.current ?? INITIAL_SECONDS,
+    await set(ref(db, 'timerState'), {
+      secondsAtStart: secondsNow,
+      startedAt:      Date.now(),
+      running:        true,
     });
-  }, [timerSeconds]);
+  }, []);
 
-  // ── Log Activity ─────────────────────────────────────────────────────────
-  const handleLogActivity = useCallback(({ name, description }) => {
-    const { date, time } = pausedAtRef.current || now();
-    const id = uid();
-    const entry = {
-      name: name || 'Untitled',
-      description,
-      timeUsedSecs: activityModal.timeUsedSecs,
-      dateCreated: date,
-      timeCreated: time,
-      logged: true,
-      createdAt: Date.now(),
-    };
-    set(ref(db, `activities/${id}`), entry);
-    setActivityModal(null);
-    sessionStartRef.current = null;
-  }, [activityModal]);
+  // ── Pause ─────────────────────────────────────────────────────────────────
+  const handlePause = useCallback(async () => {
+    const stateSnap = await get(ref(db, 'timerState'));
+    const state     = stateSnap.val() || {};
+    const currentSeconds = state.running
+      ? state.secondsAtStart - (Date.now() - state.startedAt) / 1000
+      : (state.secondsAtStart ?? INITIAL_SECONDS);
 
-  // ── Cancel Activity ──────────────────────────────────────────────────────
-  const handleCancelActivity = useCallback(({ name, description }) => {
-    const { date, time } = pausedAtRef.current || now();
-    const id = uid();
-    const entry = {
-      name: name || 'Untitled',
+    // Freeze the timer
+    await set(ref(db, 'timerState'), {
+      secondsAtStart: currentSeconds,
+      startedAt:      null,
+      running:        false,
+    });
+
+    // Write lock so other tabs see "activity being created"
+    const { date, time } = nowLabel();
+    await set(ref(db, 'pendingActivity'), {
+      timeUsedSecs:     (state.secondsAtStart ?? INITIAL_SECONDS) - currentSeconds,
+      timerBeforeStart: state.secondsAtStart ?? INITIAL_SECONDS,
+      pausedDate:       date,
+      pausedTime:       time,
+    });
+
+    thisTabPausedRef.current = true;
+  }, []);
+
+  // ── Log Activity ──────────────────────────────────────────────────────────
+  const handleLogActivity = useCallback(async ({ name, description }) => {
+    const pa = pendingActivity;
+    if (!pa) return;
+    await set(ref(db, `activities/${uid()}`), {
+      name:         name || 'Untitled',
       description,
-      timeUsedSecs: activityModal.timeUsedSecs,
-      dateCreated: date,
-      timeCreated: time,
-      logged: false,
-      createdAt: Date.now(),
-    };
-    set(ref(db, `activities/${id}`), entry);
-    // revert timer
-    const revertTo = activityModal.timerBeforeStart;
-    set(ref(db, 'timer'), revertTo);
-    setTimerSeconds(revertTo);
+      timeUsedSecs: pa.timeUsedSecs,
+      dateCreated:  pa.pausedDate,
+      timeCreated:  pa.pausedTime,
+      logged:       true,
+      createdAt:    Date.now(),
+    });
+    await set(ref(db, 'pendingActivity'), null);
     setActivityModal(null);
-    sessionStartRef.current = null;
-  }, [activityModal]);
+  }, [pendingActivity]);
+
+  // ── Cancel Activity ───────────────────────────────────────────────────────
+  const handleCancelActivity = useCallback(async ({ name, description }) => {
+    const pa = pendingActivity;
+    if (!pa) return;
+    await set(ref(db, `activities/${uid()}`), {
+      name:         name || 'Untitled',
+      description,
+      timeUsedSecs: pa.timeUsedSecs,
+      dateCreated:  pa.pausedDate,
+      timeCreated:  pa.pausedTime,
+      logged:       false,
+      createdAt:    Date.now(),
+    });
+    // Revert timer
+    await set(ref(db, 'timerState'), {
+      secondsAtStart: pa.timerBeforeStart,
+      startedAt:      null,
+      running:        false,
+    });
+    await set(ref(db, 'pendingActivity'), null);
+    setActivityModal(null);
+  }, [pendingActivity]);
+
+  // ── Override (force-dismiss pending activity from another tab) ────────────
+  const handleOverride = useCallback(async () => {
+    const pa = pendingActivity;
+    if (pa) {
+      // Log as cancelled with a generic name
+      await set(ref(db, `activities/${uid()}`), {
+        name:         'Overridden Activity',
+        description:  '',
+        timeUsedSecs: pa.timeUsedSecs,
+        dateCreated:  pa.pausedDate,
+        timeCreated:  pa.pausedTime,
+        logged:       false,
+        createdAt:    Date.now(),
+      });
+      // Revert timer to before the overridden session
+      await set(ref(db, 'timerState'), {
+        secondsAtStart: pa.timerBeforeStart,
+        startedAt:      null,
+        running:        false,
+      });
+      await set(ref(db, 'pendingActivity'), null);
+    }
+    setActivityModal(null);
+    setBlockedModal(false);
+  }, [pendingActivity]);
 
   // ── Edit Activity ─────────────────────────────────────────────────────────
   const handleEditActivity = useCallback((activity) => {
@@ -311,42 +452,59 @@ export default function App() {
     setEditModal(activity);
   }, []);
 
-  const handleSaveEdit = useCallback(({ name, description, logged }) => {
-    const original = editModal;
+  const handleSaveEdit = useCallback(async ({ name, description, logged }) => {
+    const original  = editModal;
     const wasLogged = original.logged;
-    const nowLogged = logged;
-
-    const updated = { ...original, name, description, logged: nowLogged };
+    const updated   = { ...original, name, description, logged };
     delete updated.id;
+    await set(ref(db, `activities/${original.id}`), updated);
 
-    set(ref(db, `activities/${original.id}`), updated);
+    const snap  = await get(ref(db, 'timerState'));
+    const state = snap.val() || {};
+    const cur   = state.running
+      ? state.secondsAtStart - (Date.now() - state.startedAt) / 1000
+      : (state.secondsAtStart ?? INITIAL_SECONDS);
 
-    // adjust timer if logged status changed
-    if (!wasLogged && nowLogged) {
-      // was cancelled, now logged → deduct time
-      const newTimer = timerSeconds - original.timeUsedSecs;
-      set(ref(db, 'timer'), newTimer);
-    } else if (wasLogged && !nowLogged) {
-      // was logged, now cancelled → add time back
-      const newTimer = timerSeconds + original.timeUsedSecs;
-      set(ref(db, 'timer'), newTimer);
+    if (!wasLogged && logged) {
+      await set(ref(db, 'timerState'), {
+        ...state, secondsAtStart: cur - original.timeUsedSecs,
+        startedAt: state.running ? Date.now() : null,
+      });
+    } else if (wasLogged && !logged) {
+      await set(ref(db, 'timerState'), {
+        ...state, secondsAtStart: cur + original.timeUsedSecs,
+        startedAt: state.running ? Date.now() : null,
+      });
     }
     setEditModal(null);
-  }, [editModal, timerSeconds]);
+  }, [editModal]);
 
   // ── Delete Activity ───────────────────────────────────────────────────────
-  const handleDeleteActivity = useCallback((activity) => {
-    set(ref(db, `activities/${activity.id}`), null);
+  const handleDeleteActivity = useCallback(async (activity) => {
+    await set(ref(db, `activities/${activity.id}`), null);
     if (activity.logged) {
-      const newTimer = timerSeconds + activity.timeUsedSecs;
-      set(ref(db, 'timer'), newTimer);
+      const snap  = await get(ref(db, 'timerState'));
+      const state = snap.val() || {};
+      const cur   = state.running
+        ? state.secondsAtStart - (Date.now() - state.startedAt) / 1000
+        : (state.secondsAtStart ?? INITIAL_SECONDS);
+      await set(ref(db, 'timerState'), {
+        ...state, secondsAtStart: cur + activity.timeUsedSecs,
+        startedAt: state.running ? Date.now() : null,
+      });
     }
     setDescModal(null);
-  }, [timerSeconds]);
+  }, []);
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  // ── Derived ───────────────────────────────────────────────────────────────
+  const lastActivityLogged =
+    activities.length > 0 &&
+    activities[activities.length - 1]?.logged === true &&
+    timerSeconds <= 0;
+
   const { neg, str: timeStr } = formatTime(timerSeconds);
 
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className={`app${flashRed ? ' flash-red' : ''}`}>
       <div className="stars" aria-hidden />
@@ -432,7 +590,6 @@ export default function App() {
         </section>
       )}
 
-      {/* Activity Created Modal (new) */}
       {activityModal && !editModal && (
         <ActivityModal
           timeUsedSecs={activityModal.timeUsedSecs}
@@ -442,7 +599,6 @@ export default function App() {
         />
       )}
 
-      {/* Edit Modal */}
       {editModal && (
         <EditActivityModal
           activity={editModal}
@@ -451,7 +607,6 @@ export default function App() {
         />
       )}
 
-      {/* Description Modal */}
       {descModal && !editModal && (
         <DescriptionModal
           activity={descModal}
@@ -460,75 +615,13 @@ export default function App() {
           onDelete={() => handleDeleteActivity(descModal)}
         />
       )}
-    </div>
-  );
-}
 
-// ── Edit Activity Modal ───────────────────────────────────────────────────────
-function EditActivityModal({ activity, onSave, onClose }) {
-  const [name, setName] = useState(activity.name);
-  const [desc, setDesc] = useState(activity.description || '');
-  const [logged, setLogged] = useState(activity.logged);
-  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
-
-  const { neg, str } = formatTime(activity.timeUsedSecs);
-
-  if (showCancelConfirm) {
-    return (
-      <CancelConfirmModal
-        onConfirm={() => onSave({ name, description: desc, logged: false })}
-        onKeepEditing={() => setShowCancelConfirm(false)}
-      />
-    );
-  }
-
-  return (
-    <div className="overlay">
-      <div className="modal activity-modal">
-        <div className="modal-header-row">
-          <h2 className="modal-title">Edit Activity</h2>
-          <div className="modal-meta">
-            <span className="meta-chip time-chip">⏱ {neg ? '-' : ''}{str} used</span>
-            <span className="meta-chip date-chip">📅 {activity.dateCreated}</span>
-            <span className="meta-chip date-chip">🕐 {activity.timeCreated}</span>
-          </div>
-        </div>
-
-        <label className="field-label">Name Activity:</label>
-        <input
-          type="text"
-          className="text-input"
-          value={name}
-          onChange={e => setName(e.target.value)}
+      {blockedModal && (
+        <ActivityBlockedModal
+          onClose={() => setBlockedModal(false)}
+          onOverride={handleOverride}
         />
-
-        <label className="field-label">Activity Description:</label>
-        <textarea
-          className="text-input textarea"
-          value={desc}
-          onChange={e => setDesc(e.target.value)}
-          rows={5}
-        />
-
-        <label className="field-label">Status:</label>
-        <div className="toggle-row">
-          <button
-            className={`btn btn-sm ${logged ? 'btn-success' : 'btn-ghost'}`}
-            onClick={() => setLogged(true)}
-          >Logged</button>
-          <button
-            className={`btn btn-sm ${!logged ? 'btn-danger' : 'btn-ghost'}`}
-            onClick={() => setLogged(false)}
-          >Cancelled</button>
-        </div>
-
-        <div className="btn-row">
-          <button className="btn btn-ghost" onClick={onClose}>Discard Changes</button>
-          <button className="btn btn-primary" onClick={() => onSave({ name, description: desc, logged })}>
-            Save Changes
-          </button>
-        </div>
-      </div>
+      )}
     </div>
   );
 }
